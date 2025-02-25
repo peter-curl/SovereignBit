@@ -230,3 +230,211 @@
   { function: (string-ascii 50), caller: principal }
   { last-call: uint, calls: uint }
 )
+
+;; Utility Functions
+(define-read-only (is-protocol-admin (sender principal))
+  (default-to false (map-get? protocol-admin-whitelist sender))
+)
+
+(define-read-only (is-valid-principal (input principal))
+  (and 
+    (not (is-eq input tx-sender))
+    (not (is-eq input (as-contract tx-sender)))
+  )
+)
+
+(define-read-only (is-safe-principal (input principal))
+  (and 
+    (is-valid-principal input)
+    (or 
+      (is-protocol-admin input)
+      (is-some (map-get? leaderboard { player: input }))
+    )
+  )
+)
+
+(define-read-only (get-world-details (world-id uint))
+  (map-get? game-worlds { world-id: world-id })
+)
+
+(define-read-only (get-avatar-details (avatar-id uint))
+  (map-get? avatar-metadata { avatar-id: avatar-id })
+)
+
+(define-read-only (get-top-players)
+  (let 
+    (
+      (max-entries (var-get max-leaderboard-entries))
+    )
+    (list 
+      tx-sender
+    )
+  )
+)
+
+;; Read-only function to get experience required for next level
+(define-read-only (get-next-level-requirement
+    (avatar-id uint)
+  )
+  (match (get-avatar-details avatar-id)
+    metadata (ok (calculate-level-up-experience (get level metadata)))
+    ERR-INVALID-AVATAR
+  )
+)
+
+;; Read-only function to check if avatar can receive experience
+(define-read-only (can-receive-experience
+    (avatar-id uint)
+    (experience-amount uint)
+  )
+  (match (get-avatar-details avatar-id)
+    metadata (ok (and
+      (< (get level metadata) MAX-LEVEL)
+      (validate-experience-gain 
+        (get experience metadata)
+        experience-amount
+        (get level metadata)
+      )))
+    ERR-INVALID-AVATAR
+  )
+)
+
+;; Leaderboard Functions
+(define-read-only (get-paginated-leaderboard (page uint) (items-per-page uint))
+  (let
+    (
+      (start (* page items-per-page))
+      (end (+ start items-per-page))
+    )
+    (filter is-valid-ranking
+      (map get-ranking-at-position (generate-sequence start end))
+    )
+  )
+)
+
+
+;; Protocol Management
+(define-public (initialize-protocol 
+  (entry-fee uint) 
+  (max-entries uint)
+)
+  (begin
+    (asserts! (is-protocol-admin tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (and (>= entry-fee u1) (<= entry-fee u1000)) ERR-INVALID-FEE)
+    (asserts! (and (>= max-entries u1) (<= max-entries u500)) ERR-INVALID-ENTRIES)
+    
+    (var-set protocol-fee entry-fee)
+    (var-set max-leaderboard-entries max-entries)
+    
+    (ok true)
+  )
+)
+
+;; Asset Management
+;; mint-bitrealm-asset
+(define-public (mint-bitrealm-asset 
+    (name (string-ascii 50))
+    (description (string-ascii 200))
+    (rarity (string-ascii 20))
+    (power-level uint)
+    (world-id uint)
+    (attributes (list 10 (string-ascii 20)))
+  )
+  (let 
+    ((token-id (+ (var-get total-assets) u1)))
+    
+    (asserts! (is-protocol-admin tx-sender) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-name name) ERR-INVALID-NAME)
+    (asserts! (is-valid-description description) ERR-INVALID-DESCRIPTION)
+    (asserts! (is-valid-rarity rarity) ERR-INVALID-RARITY)
+    (asserts! (is-valid-power-level power-level) ERR-INVALID-POWER-LEVEL)
+    (asserts! (is-some (get-world-details world-id)) ERR-WORLD-NOT-FOUND)
+    (asserts! (is-valid-attributes attributes) ERR-INVALID-ATTRIBUTES)
+    
+    (try! (nft-mint? bitrealm-asset token-id tx-sender))
+    
+    (map-set bitrealm-asset-metadata 
+      { token-id: token-id }
+      {
+        name: name,
+        description: description,
+        rarity: rarity,
+        power-level: power-level,
+        world-id: world-id,
+        attributes: attributes,
+        experience: u0,
+        level: u1
+      }
+    )
+    
+    (var-set total-assets token-id)
+    
+    ;; Fixed event emission
+    (unwrap! (emit-asset-event EVENT-ASSET-MINTED token-id tx-sender none) ERR-NOT-AUTHORIZED)
+    
+    (ok token-id)
+  )
+)
+
+(define-public (transfer-game-asset 
+  (token-id uint) 
+  (recipient principal)
+)
+  (begin
+    (asserts! 
+      (is-eq tx-sender (unwrap! (nft-get-owner? bitrealm-asset token-id) ERR-INVALID-GAME-ASSET))
+      ERR-NOT-AUTHORIZED
+    )
+    
+    (asserts! (is-valid-principal recipient) ERR-INVALID-INPUT)
+    
+    (nft-transfer? bitrealm-asset token-id tx-sender recipient)
+  )
+)
+
+;; Avatar System
+(define-public (create-avatar
+    (name (string-ascii 50))
+    (world-access (list 10 uint))
+  )
+  (let
+    ((avatar-id (+ (var-get total-avatars) u1)))
+    
+    ;; Input validation
+    (asserts! (is-valid-name name) ERR-INVALID-NAME)
+    (asserts! (is-valid-world-access world-access) ERR-INVALID-WORLD-ACCESS)
+    (asserts! 
+      (is-none (map-get? leaderboard { player: tx-sender }))
+      ERR-ALREADY-REGISTERED
+    )
+    
+    (try! (nft-mint? player-avatar avatar-id tx-sender))
+    
+    (map-set avatar-metadata
+      { avatar-id: avatar-id }
+      {
+        name: name,
+        level: u1,
+        experience: u0,
+        achievements: (list),
+        equipped-assets: (list),
+        world-access: world-access
+      }
+    )
+    
+    (map-set leaderboard
+      { player: tx-sender }
+      {
+        score: u0,
+        games-played: u0,
+        total-rewards: u0,
+        avatar-id: avatar-id,
+        rank: u0,
+        achievements: (list)
+      }
+    )
+    
+    (var-set total-avatars avatar-id)
+    (ok avatar-id)
+  )
+)
