@@ -231,6 +231,7 @@
   { last-call: uint, calls: uint }
 )
 
+
 ;; Utility Functions
 (define-read-only (is-protocol-admin (sender principal))
   (default-to false (map-get? protocol-admin-whitelist sender))
@@ -633,3 +634,172 @@
     (ok trade-id)
   )
 )
+
+(define-public (execute-trade (trade-id uint))
+  (let
+    (
+      (total-trades-count (var-get total-trades))
+    )
+    ;; Validate trade-id
+    (asserts! (<= trade-id total-trades-count) ERR-TRADE-NOT-FOUND)
+    (asserts! (> trade-id u0) ERR-INVALID-INPUT)
+    
+    (let
+      (
+        (trade (unwrap! (map-get? active-trades { trade-id: trade-id }) ERR-TRADE-NOT-FOUND))
+        (asset-id (get asset-id trade))
+      )
+      
+      (asserts! (is-eq (get status trade) "active") ERR-INVALID-TRADE-STATUS)
+      (asserts! (<= stacks-block-height (get expiry trade)) ERR-TRADE-EXPIRED)
+      (asserts! (>= (stx-get-balance tx-sender) (get price trade)) ERR-INSUFFICIENT-BALANCE)
+      
+      ;; Transfer STX
+      (try! (stx-transfer? (get price trade) tx-sender (get seller trade)))
+      
+      ;; Transfer NFT
+      (try! (nft-transfer? bitrealm-asset asset-id (get seller trade) tx-sender))
+      
+      ;; Update trade status
+      (map-set active-trades
+        { trade-id: trade-id }
+        (merge trade {
+          status: "completed",
+          buyer: (some tx-sender)
+        })
+      )
+      
+      (unwrap! (emit-asset-event EVENT-TRADE-COMPLETED asset-id (get seller trade) (some tx-sender)) ERR-NOT-AUTHORIZED)
+      
+      (ok true)
+    )
+  )
+)
+
+(define-private (is-valid-reward-candidate (player principal))
+  (match (map-get? leaderboard { player: player })
+    stats (and 
+            (> (get score stats) u0)
+            (is-valid-principal player)
+          )
+    false
+  )
+)
+
+(define-private (distribute-reward 
+  (player principal) 
+  (previous-result (response bool uint))
+)
+  (match (map-get? leaderboard { player: player })
+    player-stats 
+      (let 
+        (
+          (reward-amount (calculate-reward (get score player-stats)))
+        )
+        (if (and (is-ok previous-result) (> reward-amount u0))
+          (begin
+            (map-set leaderboard 
+              { player: player }
+              (merge player-stats 
+                { total-rewards: (+ (get total-rewards player-stats) reward-amount) }
+              )
+            )
+            (ok true)
+          )
+          previous-result
+        )
+      )
+    previous-result
+  )
+)
+
+(define-private (calculate-reward (score uint))
+  (if (and (> score u100) (<= score u10000))
+    (* score u10)
+    u0
+  )
+)
+
+;; Helper function to calculate required experience for next level
+(define-private (calculate-level-up-experience (current-level uint))
+  (* BASE-EXPERIENCE-REQUIRED current-level)
+)
+
+;; Helper function to validate experience points
+(define-private (validate-experience-gain
+    (current-experience uint)
+    (gained-experience uint)
+    (current-level uint)
+  )
+  (let
+    (
+      (max-allowed-gain (calculate-level-up-experience current-level))
+      (new-total-experience (+ current-experience gained-experience))
+    )
+    (and
+      (<= gained-experience max-allowed-gain)
+      (<= new-total-experience (* MAX-EXPERIENCE-PER-LEVEL current-level))
+    )
+  )
+)
+
+;; Helper function to check if level up is warranted
+(define-private (can-level-up
+    (current-experience uint)
+    (gained-experience uint)
+    (current-level uint)
+  )
+  (let
+    (
+      (new-total-experience (+ current-experience gained-experience))
+      (required-experience (calculate-level-up-experience current-level))
+    )
+    (>= new-total-experience required-experience)
+  )
+)
+
+(define-private (is-valid-ranking (entry (optional { player: principal, score: uint })))
+  (is-some entry)
+)
+
+(define-private (get-ranking-at-position (position uint))
+  (map-get? player-rankings { rank: position })
+)
+
+(define-private (generate-sequence (start uint) (end uint))
+  (list start)
+)
+
+(define-private (check-rate-limit (function (string-ascii 50)))
+  (let
+    (
+      (current-limits (default-to
+        { last-call: u0, calls: u0 }
+        (map-get? rate-limits { function: function, caller: tx-sender })
+      ))
+    )
+    (if (> (- stacks-block-height (get last-call current-limits)) RATE-LIMIT-WINDOW)
+      (begin
+        (map-set rate-limits
+          { function: function, caller: tx-sender }
+          { last-call: stacks-block-height, calls: u1 }
+        )
+        true
+      )
+      (if (< (get calls current-limits) MAX-CALLS-PER-WINDOW)
+        (begin
+          (map-set rate-limits
+            { function: function, caller: tx-sender }
+            (merge current-limits { calls: (+ (get calls current-limits) u1) })
+          )
+          true
+        )
+        false
+      )
+    )
+  )
+)
+
+;; Initialize Protocol
+;; Set contract deployer as initial admin
+(map-set protocol-admin-whitelist tx-sender true)
