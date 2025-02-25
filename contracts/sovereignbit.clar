@@ -116,3 +116,117 @@
     (not (is-eq description ""))
   )
 )
+
+(define-private (is-valid-rarity (rarity (string-ascii 20)))
+  (or 
+    (is-eq rarity "common")
+    (is-eq rarity "uncommon")
+    (is-eq rarity "rare")
+    (is-eq rarity "epic")
+    (is-eq rarity "legendary")
+  )
+)
+
+(define-private (is-valid-power-level (power uint))
+  (and (>= power u1) (<= power u1000))
+)
+
+(define-private (is-valid-attributes (attributes (list 10 (string-ascii 20))))
+  (and 
+    (>= (len attributes) u1)
+    (<= (len attributes) u10)
+  )
+)
+
+(define-private (is-valid-world-access (worlds (list 10 uint)))
+  (and 
+    (>= (len worlds) u1)
+    (<= (len worlds) u10)
+    (fold check-world-exists worlds true)
+  )
+)
+
+(define-private (check-world-exists (world-id uint) (valid bool))
+  (and valid (is-some (get-world-details world-id)))
+)
+
+;; NFT Definitions
+(define-non-fungible-token bitrealm-asset uint)
+(define-non-fungible-token player-avatar uint)
+
+;; Asset Metadata Map
+(define-map bitrealm-asset-metadata 
+  { token-id: uint }
+  { 
+    name: (string-ascii 50),
+    description: (string-ascii 200),
+    rarity: (string-ascii 20),
+    power-level: uint,
+    world-id: uint,
+    attributes: (list 10 (string-ascii 20)),
+    experience: uint,
+    level: uint
+  }
+)
+
+;; Player Avatar Map
+(define-map avatar-metadata
+  { avatar-id: uint }
+  {
+    name: (string-ascii 50),
+    level: uint,
+    experience: uint,
+    achievements: (list 20 (string-ascii 50)),
+    equipped-assets: (list 5 uint),
+    world-access: (list 10 uint)
+  })
+
+;; Game Worlds
+(define-map game-worlds
+  { world-id: uint }
+  {
+    name: (string-ascii 50),
+    description: (string-ascii 200),
+    entry-requirement: uint,
+    active-players: uint,
+    total-rewards: uint
+  }
+)
+
+;; Leaderboard System
+(define-map leaderboard 
+  { player: principal }
+  { 
+    score: uint, 
+    games-played: uint,
+    total-rewards: uint,
+    avatar-id: uint,
+    rank: uint,
+    achievements: (list 20 (string-ascii 50))
+  }
+)
+
+;; Leaderboard System
+(define-map player-rankings
+  { rank: uint }
+  { player: principal, score: uint }
+)
+
+;; Trade System
+(define-map active-trades
+  { trade-id: uint }
+  {
+    seller: principal,
+    asset-id: uint,
+    price: uint,
+    expiry: uint,
+    status: (string-ascii 20),
+    buyer: (optional principal)
+  }
+)
+
+;; Security Enhancement: Rate Limiting
+(define-map rate-limits
+  { function: (string-ascii 50), caller: principal }
+  { last-call: uint, calls: uint }
+)
